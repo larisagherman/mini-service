@@ -88,7 +88,7 @@ tfidf_matrix = vectorizer.fit_transform(df["clean_text"])
 # --------------------
 class RecommendationRequest(BaseModel):
     query: str
-    top_k: int = 5
+    top_k: int 
     forbidden_ingredients: list[str] = []
     strict: bool = False
 
