@@ -50,7 +50,7 @@ df["ingredients"] = df["ingredients"].astype(str)
 def normalize_ingredient(text: str) -> str:
     """Lowercase, remove numbers/units/punctuation, lemmatize, remove stopwords"""
     text = re.sub(r"\d+(\.\d+)?", "", text)  # remove numbers
-    text = re.sub(r"\b(cup|cups|tbsp|tsp|tablespoon|tablespoons|ounce|oz|grams|g|kg|pound|lb)\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(cup|cups|tbsp|tsp|tablespoon|tablespoons|teaspoon|teaspoons|ounce|oz|grams|g|kg|pound|lb)\b", "", text, flags=re.IGNORECASE)
     text = re.sub(r"[^a-zA-Z\s]", "", text)
     text = text.lower().strip()
     tokens = [
@@ -59,7 +59,34 @@ def normalize_ingredient(text: str) -> str:
         if t not in stop_words and t not in PREPARATION_WORDS
     ]
     return " ".join(tokens)
+    
+def tokenize(text: str) -> set:
+    tokens = set()
+    for line in re.split(r'[\n,]', text):
+        normalized = normalize_ingredient(line)
+        if normalized:
+            tokens.add(normalized)   # 🔥 add whole ingredient
+    return tokens
+# Accept either a string (from user) or a list (from Gemini)
+def parse_user_query(query) -> set:
+    tokens = []
 
+    if isinstance(query, str):
+        # Split string by commas or spaces
+        items = re.split(r'[\n,]', query)
+        items = [i.strip() for i in items if i.strip()]
+    elif isinstance(query, list):
+        # Already a list from Gemini
+        items = query
+    else:
+        items = []
+
+    for item in items:
+        normalized = normalize_ingredient(item)
+        if normalized:
+            tokens.append(normalized)
+
+    return set(tokens)
 def get_recipe_tokens(recipe_ingredients: str) -> set:
     """Return set of normalized tokens for a recipe"""
     tokens = set()
@@ -75,8 +102,8 @@ def clean_text(text: str) -> str:
     """Simple cleaning for TF-IDF"""
     return " ".join([normalize_ingredient(word) for word in text.split()])
 
-df["clean_text"] = (df["name"] + " " + df["ingredients"]).apply(clean_text)
-
+df["tokens"] = df["ingredients"].apply(tokenize)
+df["clean_text"] = df["name"].apply(normalize_ingredient) + " " + df["ingredients"].apply(lambda x: " ".join(tokenize(x)))
 # --------------------
 # TF-IDF model
 # --------------------
@@ -87,8 +114,8 @@ tfidf_matrix = vectorizer.fit_transform(df["clean_text"])
 # Schemas
 # --------------------
 class RecommendationRequest(BaseModel):
-    query: str
-    top_k: int 
+    query: list[str]
+    top_k: int
     forbidden_ingredients: list[str] = []
     strict: bool = False
 
@@ -105,33 +132,30 @@ class RecommendationResponse(BaseModel):
 # --------------------
 @app.post("/recommend", response_model=list[RecommendationResponse])
 def recommend(data: RecommendationRequest):
-    # 1️⃣ Normalize user input
+    # 1️⃣ Parse ingredients (handles list or string)
     user_tokens = set()
-    for i in re.split(r'[\n,]', data.query):
-        i = i.strip()
-        if i:
-            normalized = normalize_ingredient(i)
-            if normalized:
-                user_tokens.add(normalized)
-    
-    # 2️⃣ TF-IDF similarity
-    query_vec = vectorizer.transform([clean_text(data.query)])
+    for item in data.query:
+        user_tokens.update(tokenize(item))
+
+    query_string = " ".join(user_tokens)
+    query_vec = vectorizer.transform([query_string])
     tfidf_scores = cosine_similarity(query_vec, tfidf_matrix)[0]
-    
-    # 3️⃣ Candidates
+
+    # 2️⃣ Candidate selection
     top_idx = tfidf_scores.argsort()[-(data.top_k*5):][::-1]
     candidates = df.iloc[top_idx].copy()
-    
-    # 4️⃣ Filter forbidden ingredients
+
+    # 3️⃣ Filter forbidden ingredients safely
     if data.forbidden_ingredients:
-        pattern = "|".join(data.forbidden_ingredients)
+        pattern = "|".join(re.escape(i) for i in data.forbidden_ingredients)
         candidates = candidates[~candidates["ingredients"].str.contains(pattern, case=False, regex=True)]
-    
-    # 5️⃣ Calculate missing ingredients & score
+
+    # 4️⃣ Calculate missing ingredients & score
     recipe_scores = []
     exact_match_found = False
 
-    for i, row in candidates.iterrows():
+    for idx in candidates.index:
+        row = df.loc[idx]
         recipe_tokens = get_recipe_tokens(row["ingredients"])
         missing_tokens = recipe_tokens - user_tokens
         missing_count = len(missing_tokens)
@@ -139,39 +163,31 @@ def recommend(data: RecommendationRequest):
         if missing_count == 0:
             exact_match_found = True
 
-        # strict mode removes non-exact matches ONLY if exact exists
         if data.strict and missing_count > 0:
             continue
 
-        score = tfidf_scores[i]
+        score = tfidf_scores[idx]
         recipe_scores.append((score, missing_count, missing_tokens, row))
 
-
-    # ---------- STRICT FALLBACK ----------
-    fallback_mode = False
-
+    # 5️⃣ Strict fallback
     if data.strict and not exact_match_found:
-        fallback_mode = True
         recipe_scores = []
-
-        for i, row in candidates.iterrows():
+        for idx in candidates.index:
+            row = df.loc[idx]
             recipe_tokens = get_recipe_tokens(row["ingredients"])
             missing_tokens = recipe_tokens - user_tokens
             missing_count = len(missing_tokens)
-            score = tfidf_scores[i]
+            score = tfidf_scores[idx]
             recipe_scores.append((score, missing_count, missing_tokens, row))
 
-
-    # ---------- SORTING ----------
-    if fallback_mode:
-        # PRIORITIZE fewest ingredients to buy
+    # 6️⃣ Sorting
+    if data.strict and not exact_match_found:
+        # prioritize fewest missing ingredients
         recipe_scores.sort(key=lambda x: (x[1], -x[0]))
     else:
-        # normal ranking
         recipe_scores.sort(key=lambda x: (-x[0], x[1]))
 
-    
-    # 6️⃣ Prepare results
+    # 7️⃣ Prepare results
     results = []
     for score, missing_count, missing_tokens, row in recipe_scores[:data.top_k]:
         results.append({
@@ -182,5 +198,5 @@ def recommend(data: RecommendationRequest):
             "missing_count": missing_count,
             "missing_ingredients": sorted(list(missing_tokens))
         })
-    
+
     return results
