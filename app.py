@@ -55,10 +55,10 @@ def normalize_ingredient(text: str) -> str:
     text = re.sub(r"[^a-zA-Z\s]", "", text)
     text = text.lower().strip()
     tokens = [
-        lemmatizer.lemmatize(t)
+        t
         for t in text.split()
         if t not in stop_words and t not in PREPARATION_WORDS
-    ]
+    ]   
     return " ".join(tokens)
 # --------------------
 # Build known ingredient vocabulary
@@ -71,8 +71,10 @@ for ing_list in df["ingredients"]:
         if norm:
             ALL_INGREDIENTS.add(norm)
 
-ALL_INGREDIENTS = list(ALL_INGREDIENTS)
 
+ALL_INGREDIENTS = list(ALL_INGREDIENTS)
+print("Number of ingredients:", len(ALL_INGREDIENTS))
+print(ALL_INGREDIENTS)
 sym_spell = SymSpell(max_dictionary_edit_distance=2, prefix_length=7)
 
 for word in ALL_INGREDIENTS:
@@ -130,7 +132,7 @@ def get_recipe_tokens(recipe_ingredients: str) -> set:
         line = line.strip()
         if line:
             corrected = symspell_correct(line.lower()) 
-            normalized = normalize_ingredient(line)
+            normalized = normalize_ingredient(corrected)
             if normalized:
                 tokens.add(normalized)
     return tokens
