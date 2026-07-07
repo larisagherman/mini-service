@@ -7,3 +7,4 @@ nltk
 python-dotenv
 rapidfuzz
 sentence-transformers
+install symspellpy

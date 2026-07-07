@@ -11,6 +11,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from dotenv import load_dotenv
 from typing import Optional
 from nltk.stem import WordNetLemmatizer
+from symspellpy import SymSpell, Verbosity
 
 nltk.download("stopwords")
 nltk.download("wordnet")
@@ -59,7 +60,38 @@ def normalize_ingredient(text: str) -> str:
         if t not in stop_words and t not in PREPARATION_WORDS
     ]
     return " ".join(tokens)
-    
+# --------------------
+# Build known ingredient vocabulary
+# --------------------
+ALL_INGREDIENTS = set()
+
+for ing_list in df["ingredients"]:
+    for ing in re.split(r'[\n,]', str(ing_list)):
+        norm = normalize_ingredient(ing)
+        if norm:
+            ALL_INGREDIENTS.add(norm)
+
+ALL_INGREDIENTS = list(ALL_INGREDIENTS)
+
+sym_spell = SymSpell(max_dictionary_edit_distance=2, prefix_length=7)
+
+for word in ALL_INGREDIENTS:
+    sym_spell.create_dictionary_entry(word, 1)
+
+
+def symspell_correct(token: str) -> str:
+    suggestions = sym_spell.lookup(
+        token,
+        Verbosity.CLOSEST,
+        max_edit_distance=2
+    )
+
+    if suggestions:
+        return suggestions[0].term
+
+    return token
+
+ 
 def tokenize(text: str) -> set:
     tokens = set()
     for line in re.split(r'[\n,]', text):
@@ -82,7 +114,11 @@ def parse_user_query(query) -> set:
         items = []
 
     for item in items:
-        normalized = normalize_ingredient(item)
+        raw = item.lower().strip()
+
+        corrected = symspell_correct(raw)
+        normalized = normalize_ingredient(corrected)
+
         if normalized:
             tokens.append(normalized)
 
@@ -93,6 +129,7 @@ def get_recipe_tokens(recipe_ingredients: str) -> set:
     for line in re.split(r'[\n,]', recipe_ingredients):
         line = line.strip()
         if line:
+            corrected = symspell_correct(line.lower()) 
             normalized = normalize_ingredient(line)
             if normalized:
                 tokens.add(normalized)
@@ -127,16 +164,33 @@ class RecommendationResponse(BaseModel):
     missing_count: Optional[int] = None
     missing_ingredients: Optional[list[str]] = None
 
+
+def process_user_input(query_list):
+    tokens = set()
+
+    for item in query_list:
+        tokens_raw = re.split(r"\s+", item.lower().strip())
+
+        for token in tokens_raw:
+            corrected = symspell_correct(token)
+            normalized = normalize_ingredient(corrected)
+
+            if normalized:
+                tokens.add(normalized)
+    return tokens
+
 # --------------------
 # Endpoint
 # --------------------
 @app.post("/recommend", response_model=list[RecommendationResponse])
 def recommend(data: RecommendationRequest):
     # 1️⃣ Parse ingredients (handles list or string)
-    user_tokens = set()
-    for item in data.query:
-        user_tokens.update(tokenize(item))
-
+    user_tokens = process_user_input(data.query)
+    
+    # 🔍 DEBUG OUTPUT (ADD THIS)
+    print("RAW INPUT:", data.query)
+    print("PROCESSED TOKENS (after fuzzy + normalization):", user_tokens)
+    print("SYM SPELL TEST:", sym_spell.lookup("chery", Verbosity.CLOSEST, max_edit_distance=2))    
     query_string = " ".join(user_tokens)
     query_vec = vectorizer.transform([query_string])
     tfidf_scores = cosine_similarity(query_vec, tfidf_matrix)[0]
